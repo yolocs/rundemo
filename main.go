@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 
 	cowsay "github.com/Code-Hex/Neo-cowsay"
@@ -218,8 +219,45 @@ func saySomething(text string) (string, error) {
 	return cowsay.Say(
 		cowsay.Phrase(text),
 		cowsay.BallonWidth(40),
-		cowsay.Random(),
+		cowsay.Type(pickCow()),
 	)
+}
+
+// To censor the original inappropreiate figures -_-.
+func pickCow() string {
+	allowed := []string{
+		"cows/beavis.zen.cow",
+		"cows/bud-frogs.cow",
+		"cows/bunny.cow",
+		"cows/daemon.cow",
+		"cows/default.cow",
+		"cows/docker.cow",
+		"cows/dragon.cow",
+		"cows/elephant.cow",
+		"cows/flaming-sheep.cow",
+		"cows/ghostbusters.cow",
+		"cows/gopher.cow",
+		"cows/hellokitty.cow",
+		"cows/kitty.cow",
+		"cows/koala.cow",
+		"cows/meow.cow",
+		"cows/sage.cow",
+		"cows/sheep.cow",
+		"cows/skeleton.cow",
+		"cows/squirrel.cow",
+		"cows/stegosaurus.cow",
+		"cows/turkey.cow",
+		"cows/turtle.cow",
+	}
+	cand := allowed[rand.Intn(len(allowed))]
+
+	for _, n := range cowsay.AssetNames() {
+		if n == cand {
+			return cand
+		}
+	}
+
+	return "cows/default.cow"
 }
 
 func initRedis(redisconn RedisConn) (*redis.Pool, error) {
