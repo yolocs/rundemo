@@ -1,18 +1,24 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"os"
 
 	cowsay "github.com/Code-Hex/Neo-cowsay"
-	"github.com/golang/glog"
 	"github.com/gomodule/redigo/redis"
 	"github.com/gorilla/mux"
 	"github.com/kelseyhightower/envconfig"
+
+	"go.uber.org/zap"
+
+	"cloud.google.com/go/compute/metadata"
+	"cloud.google.com/go/logging"
 
 	_ "github.com/jackc/pgx/v4/stdlib"
 )
@@ -34,38 +40,61 @@ type RedisConn struct {
 }
 
 func main() {
+	logger, _ := zap.NewDevelopment()
+
+	projectID, err := metadata.ProjectID()
+	if err != nil {
+		logger.Fatal("Failed to query project ID", zap.Error(err))
+	}
+	logClient, err := logging.NewClient(context.Background(), projectID)
+	if err != nil {
+		logger.Fatal("Failed to create logging client", zap.Error(err))
+	}
+	defer logClient.Close()
+	auditLogger := logClient.Logger("lumberjack-auditlog", logging.CommonLabels(map[string]string{"app_auditing": "true"}))
+	defer auditLogger.Flush()
+
 	var sqlconn SQLConn
 	if err := envconfig.Process("", &sqlconn); err != nil {
-		glog.Exit(err)
+		logger.Fatal("Invalid SQL config", zap.Error(err))
 	}
 	var redisconn RedisConn
 	if err := envconfig.Process("", &redisconn); err != nil {
-		glog.Exit(err)
+		logger.Fatal("Invalid Redis config", zap.Error(err))
+	}
+
+	project := os.Getenv("PROJECT_ID")
+	if project == "" {
+
 	}
 
 	db, err := initDB(sqlconn)
 	if err != nil {
-		glog.Exit(err)
+		logger.Fatal("Failed to init DB connection", zap.Error(err))
 	}
 
 	redispool, err := initRedis(redisconn)
 	if err != nil {
-		glog.Exit(err)
+		logger.Fatal("Failed to init Redis connection", zap.Error(err))
 	}
 
 	wcs := &whatcowsay{
+		audit:     auditLogger,
+		logger:    logger,
 		db:        db,
 		redispool: redispool,
 	}
 	wcs.setupRoutes()
 
-	glog.Info("Listening on port 8080")
+	logger.Info("Listening on port 8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		glog.Exit(err)
+		logger.Error("Exited", zap.Error(err))
 	}
 }
 
 type whatcowsay struct {
+	audit     *logging.Logger
+	logger    *zap.Logger
 	db        *sql.DB
 	redispool *redis.Pool
 	r         *mux.Router
@@ -81,6 +110,8 @@ func (wcs *whatcowsay) setupRoutes() {
 }
 
 func (wcs *whatcowsay) handleCowUpsert(w http.ResponseWriter, req *http.Request) {
+	wcs.audit.Log(logging.Entry{HTTPRequest: &logging.HTTPRequest{Request: req}})
+
 	cow := mux.Vars(req)["cow"]
 
 	if wcs.redispool == nil && wcs.db == nil {
@@ -100,7 +131,7 @@ func (wcs *whatcowsay) handleCowUpsert(w http.ResponseWriter, req *http.Request)
 	}
 
 	if wcs.db == nil {
-		glog.Warningf("DB is not used; will save the figure %q to cache", cow)
+		wcs.logger.Warn("DB is not used; will save to cache", zap.String("figure", cow))
 		if err := wcs.setRedisVal(cow, say); err != nil {
 			http.Error(w, "Failed to save to cache: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -117,6 +148,8 @@ func (wcs *whatcowsay) handleCowUpsert(w http.ResponseWriter, req *http.Request)
 }
 
 func (wcs *whatcowsay) handleCowSay(w http.ResponseWriter, req *http.Request) {
+	wcs.audit.Log(logging.Entry{HTTPRequest: &logging.HTTPRequest{Request: req}})
+
 	cow := mux.Vars(req)["cow"]
 
 	if wcs.redispool == nil && wcs.db == nil {
@@ -140,7 +173,7 @@ func (wcs *whatcowsay) handleCowSay(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if err != nil {
-			glog.Warningf("Redis error: %v", err)
+			wcs.logger.Warn("Redis error", zap.Error(err))
 		}
 	}
 
@@ -194,7 +227,7 @@ DO UPDATE SET message = $2;`
 		return err
 	}
 	if err := wcs.setRedisVal(key, val); err != nil {
-		glog.Warningf("Failed to pass-through save figure %q in cache", key)
+		wcs.logger.Warn("Failed to pass-through save figure in cache", zap.String("figure", key))
 	}
 	return nil
 }
@@ -206,7 +239,7 @@ func (wcs *whatcowsay) passThroughGetVal(key string) (string, error) {
 		return "", err
 	}
 	if err := wcs.setRedisVal(key, text); err != nil {
-		glog.Warningf("Failed to pass-through save figure %q in cache", key)
+		wcs.logger.Warn("Failed to pass-through save figure in cache", zap.String("figure", key))
 	}
 	return text, nil
 }
